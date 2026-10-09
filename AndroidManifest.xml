@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
 
     <application
+        android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:label="कॉल नोट्स"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
