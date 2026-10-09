@@ -13,6 +13,8 @@ jobs:
           mv MainActivity.kt app/src/main/java/com/example/callnotes/
           mv AndroidManifest.xml app/src/main/
           mv app-build.gradle.kts app/build.gradle.kts
+          mkdir -p app/src/main/res/mipmap-xxxhdpi
+          mv icon.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
