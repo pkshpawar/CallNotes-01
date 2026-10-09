@@ -9,6 +9,8 @@ import android.os.Bundle
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.widget.Toast
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -18,6 +20,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -98,6 +102,57 @@ fun parseCsv(text: String): List<List<String>> {
     return rows
 }
 
+// ---------- WhatsApp helpers ----------
+fun waNumber(raw: String, cc: String): String {
+    val d = raw.filter { it.isDigit() }
+    return when {
+        raw.trim().startsWith("+") -> d
+        d.length == 10 -> cc + d
+        d.length == 11 && d.startsWith("0") -> cc + d.drop(1)
+        else -> d
+    }
+}
+
+// चॅट थेट उघडतो; फोटो असल्यास फोटोसह. WhatsApp / WhatsApp Business दोन्ही चालतात.
+fun openWhatsApp(ctx: Context, number: String, msg: String, image: Uri?): Boolean {
+    for (pkg in listOf("com.whatsapp", "com.whatsapp.w4b")) {
+        try {
+            val i = if (image != null) {
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "image/*"
+                    putExtra(Intent.EXTRA_STREAM, image)
+                    putExtra(Intent.EXTRA_TEXT, msg)
+                    putExtra("jid", "$number@s.whatsapp.net")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            } else {
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$number?text=${Uri.encode(msg)}"))
+            }
+            i.setPackage(pkg)
+            ctx.startActivity(i)
+            return true
+        } catch (e: Exception) {
+        }
+    }
+    return false
+}
+
+@Composable
+fun SmallCheck(checked: Boolean, onToggle: () -> Unit) {
+    val shape = RoundedCornerShape(4.dp)
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .clip(shape)
+            .border(1.5.dp, LocalContentColor.current.copy(alpha = 0.6f), shape)
+            .background(if (checked) Color(0xFF2E7D32) else Color.Transparent)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center
+    ) {
+        if (checked) Text("✓", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
 // ---------- लहान बटन ----------
 @Composable
 fun SmallBtn(
@@ -134,6 +189,15 @@ fun Screen() {
     var showDialog by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var showClearAll by remember { mutableStateOf(false) }
+
+    // WhatsApp
+    val selected = remember { mutableStateListOf<String>() }
+    var showWa by remember { mutableStateOf(false) }
+    var waMsg by remember { mutableStateOf(prefs.getString("wa_msg", "") ?: "") }
+    var cc by remember { mutableStateOf(prefs.getString("cc", "91") ?: "91") }
+    var waImageUri by remember { mutableStateOf<Uri?>(null) }
+    var queue by remember { mutableStateOf(listOf<Contact>()) }
+    var qIndex by remember { mutableStateOf(0) }
     var nameInput by remember { mutableStateOf("") }
     var numberInput by remember { mutableStateOf("") }
     var desInput by remember { mutableStateOf("") }
@@ -180,6 +244,24 @@ fun Screen() {
         permLauncher.launch(
             arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_CALL_LOG)
         )
+    }
+
+    // WhatsApp साठी फोटो निवडणे (कॅशमध्ये कॉपी करून FileProvider ने शेअर)
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val ext = if (ctx.contentResolver.getType(uri) == "image/png") "png" else "jpg"
+                val f = File(ctx.cacheDir, "wa_image.$ext")
+                ctx.contentResolver.openInputStream(uri)?.use { input ->
+                    f.outputStream().use { out -> input.copyTo(out) }
+                }
+                waImageUri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
+            } catch (e: Exception) {
+                toast("फोटो जोडता आला नाही")
+            }
+        }
     }
 
     // कॉन्टॅक्ट लिस्टमधून नंबर निवडण्यासाठी
@@ -326,6 +408,19 @@ fun Screen() {
                                 }
                             )
                             DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (contacts.isNotEmpty() && selected.size == contacts.size)
+                                            "निवड काढा" else "सर्व निवडा (WhatsApp)"
+                                    )
+                                },
+                                onClick = {
+                                    menuOpen = false
+                                    if (selected.size == contacts.size) selected.clear()
+                                    else { selected.clear(); selected.addAll(contacts.map { it.number }) }
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("सर्व नंबर हटवा (क्लीन अँप)", color = Color(0xFFC62828)) },
                                 onClick = {
                                     menuOpen = false
@@ -355,16 +450,61 @@ fun Screen() {
                 }
             )
         },
+        bottomBar = {
+            if (queue.isNotEmpty()) {
+                Surface(tonalElevation = 4.dp, color = Color(0xFFE8F5E9)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "WhatsApp: $qIndex/${queue.size}",
+                            fontSize = 13.sp,
+                            color = Color(0xFF1B1B1B),
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (qIndex < queue.size) {
+                            val nx = queue[qIndex]
+                            SmallBtn("पुढचा: ${nx.name}", bg = Color(0xFF25D366), fg = Color.White) {
+                                val ok = openWhatsApp(
+                                    ctx, waNumber(nx.number, cc),
+                                    waMsg.replace("{name}", nx.name), waImageUri
+                                )
+                                if (ok) qIndex++ else toast("WhatsApp सापडले नाही")
+                            }
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        SmallBtn(
+                            if (qIndex < queue.size) "थांबवा" else "पूर्ण ✓ बंद",
+                            fg = Color(0xFFC62828)
+                        ) { queue = emptyList(); qIndex = 0 }
+                    }
+                }
+            }
+        },
         floatingActionButton = {
-            SmallBtn(
-                "+ नंबर",
-                modifier = Modifier.shadow(6.dp, RoundedCornerShape(20.dp)),
-                bg = MaterialTheme.colorScheme.primary,
-                fg = MaterialTheme.colorScheme.onPrimary,
-                fontSize = 13,
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                nameInput = ""; numberInput = ""; desInput = ""; showDialog = true
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SmallBtn(
+                    "💬 WhatsApp (${selected.size})",
+                    modifier = Modifier.shadow(6.dp, RoundedCornerShape(20.dp)),
+                    bg = Color(0xFF25D366),
+                    fg = Color.White,
+                    fontSize = 13,
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    if (selected.isEmpty()) toast("आधी कार्डवरील चौकटीतून नंबर निवडा")
+                    else showWa = true
+                }
+                SmallBtn(
+                    "+ नंबर",
+                    modifier = Modifier.shadow(6.dp, RoundedCornerShape(20.dp)),
+                    bg = MaterialTheme.colorScheme.primary,
+                    fg = MaterialTheme.colorScheme.onPrimary,
+                    fontSize = 13,
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    nameInput = ""; numberInput = ""; desInput = ""; showDialog = true
+                }
             }
         }
     ) { pad ->
@@ -386,6 +526,11 @@ fun Screen() {
                     val fg = LocalContentColor.current
                     Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            SmallCheck(c.number in selected) {
+                                if (c.number in selected) selected.remove(c.number)
+                                else selected.add(c.number)
+                            }
+                            Spacer(Modifier.width(8.dp))
                             Column(Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
@@ -454,6 +599,7 @@ fun Screen() {
                             }
                             SmallBtn("काढा", fontSize = 11) {
                                 contacts.remove(c)
+                                selected.remove(c.number)
                                 prefs.edit().remove("s_${c.number}").remove("n_${c.number}").apply()
                                 saveList()
                             }
@@ -472,6 +618,73 @@ fun Screen() {
         }
     }
 
+    if (showWa) {
+        AlertDialog(
+            onDismissRequest = { showWa = false },
+            title = { Text("WhatsApp संदेश") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text("निवडलेले नंबर: ${selected.size}", fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = waMsg,
+                        onValueChange = { waMsg = it },
+                        label = { Text("संदेश ({name} = नाव)") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                    Row(
+                        Modifier.padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        SmallBtn(
+                            if (waImageUri == null) "📷 फोटो जोडा" else "📷 फोटो बदला",
+                            bg = Color(0xFF3F51B5), fg = Color.White
+                        ) { imagePicker.launch("image/*") }
+                        if (waImageUri != null) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("जोडला ✓", fontSize = 12.sp)
+                            SmallBtn("काढा", fontSize = 11) { waImageUri = null }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = cc,
+                        onValueChange = { cc = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("देश कोड (भारत = 91)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                    Text(
+                        "प्रत्येक चॅटमध्ये तुम्हाला स्वतः Send दाबावे लागेल.",
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = waMsg.isNotBlank() || waImageUri != null,
+                    onClick = {
+                        prefs.edit().putString("wa_msg", waMsg).putString("cc", cc).apply()
+                        val list = contacts.filter { it.number in selected }
+                        showWa = false
+                        if (list.isNotEmpty()) {
+                            val c0 = list[0]
+                            val ok = openWhatsApp(
+                                ctx, waNumber(c0.number, cc),
+                                waMsg.replace("{name}", c0.name), waImageUri
+                            )
+                            if (ok) { queue = list; qIndex = 1 }
+                            else toast("WhatsApp सापडले नाही")
+                        }
+                    }
+                ) { Text("सुरू करा") }
+            },
+            dismissButton = { TextButton(onClick = { showWa = false }) { Text("रद्द") } }
+        )
+    }
+
     if (showClearAll) {
         AlertDialog(
             onDismissRequest = { showClearAll = false },
@@ -485,6 +698,7 @@ fun Screen() {
             confirmButton = {
                 TextButton(onClick = {
                     contacts.clear()
+                    selected.clear()
                     status.clear()
                     notes.clear()
                     pending = null
