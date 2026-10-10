@@ -8,11 +8,20 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.callnotes2"
+        applicationId = "com.prakash.callnotes"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
