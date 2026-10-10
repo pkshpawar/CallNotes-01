@@ -13,6 +13,7 @@ jobs:
           mv MainActivity.kt app/src/main/java/com/example/callnotes/
           mv AndroidManifest.xml app/src/main/
           mv app-build.gradle.kts app/build.gradle.kts
+          mv debug.keystore app/debug.keystore
           mkdir -p app/src/main/res/mipmap-xxxhdpi
           mv icon.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
           mkdir -p app/src/main/res/xml
