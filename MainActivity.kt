@@ -8,7 +8,14 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.CallLog
 import android.provider.ContactsContract
+import android.content.pm.PackageManager
+import android.os.Build
+import android.telephony.SmsManager
+import android.telephony.SmsMessage
 import android.widget.Toast
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.core.content.FileProvider
 import java.io.File
 import androidx.activity.ComponentActivity
@@ -101,6 +108,12 @@ fun parseCsv(text: String): List<List<String>> {
     if (sb.isNotEmpty() || row.isNotEmpty()) { row.add(sb.toString()); rows.add(row) }
     return rows
 }
+
+// ---------- SMS helper ----------
+@Suppress("DEPRECATION")
+fun smsManager(ctx: Context): SmsManager =
+    if (Build.VERSION.SDK_INT >= 31) ctx.getSystemService(SmsManager::class.java)
+    else SmsManager.getDefault()
 
 // ---------- WhatsApp helpers ----------
 fun waNumber(raw: String, cc: String): String {
@@ -198,6 +211,13 @@ fun Screen() {
     var waImageUri by remember { mutableStateOf<Uri?>(null) }
     var queue by remember { mutableStateOf(listOf<Contact>()) }
     var qIndex by remember { mutableStateOf(0) }
+
+    // SMS
+    var showSms by remember { mutableStateOf(false) }
+    var smsMsg by remember { mutableStateOf(prefs.getString("sms_msg", "") ?: "") }
+    var smsToAll by remember { mutableStateOf(false) }
+    var smsSending by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     var nameInput by remember { mutableStateOf("") }
     var numberInput by remember { mutableStateOf("") }
     var desInput by remember { mutableStateOf("") }
@@ -244,6 +264,41 @@ fun Screen() {
         permLauncher.launch(
             arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_CALL_LOG)
         )
+    }
+
+    // ---------- SMS थेट पाठवणे ----------
+    fun startSms() {
+        val targets = if (smsToAll) contacts.toList() else contacts.filter { it.number in selected }
+        if (targets.isEmpty()) { toast("आधी नंबर निवडा"); return }
+        if (smsSending) return
+        prefs.edit().putString("sms_msg", smsMsg).apply()
+        showSms = false
+        smsSending = true
+        toast("SMS पाठवत आहे… कृपया थांबा")
+        scope.launch {
+            var ok = 0
+            var fail = 0
+            val sm = smsManager(ctx)
+            for (c in targets) {
+                try {
+                    val text = smsMsg.replace("{name}", c.name)
+                    val parts = sm.divideMessage(text)
+                    sm.sendMultipartTextMessage(c.number.replace(" ", ""), null, parts, null, null)
+                    ok++
+                } catch (e: Exception) {
+                    fail++
+                }
+                delay(400)
+            }
+            smsSending = false
+            toast("SMS: $ok पाठवले" + if (fail > 0) ", $fail अयशस्वी" else "")
+        }
+    }
+
+    val smsPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startSms() else toast("SMS परवानगी नाकारली")
     }
 
     // WhatsApp साठी फोटो निवडणे (कॅशमध्ये कॉपी करून FileProvider ने शेअर)
@@ -496,6 +551,17 @@ fun Screen() {
                     else showWa = true
                 }
                 SmallBtn(
+                    "✉ SMS",
+                    modifier = Modifier.shadow(6.dp, RoundedCornerShape(20.dp)),
+                    bg = Color(0xFFEF6C00),
+                    fg = Color.White,
+                    fontSize = 13,
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    if (contacts.isEmpty()) toast("यादी रिकामी आहे")
+                    else { smsToAll = selected.isEmpty(); showSms = true }
+                }
+                SmallBtn(
                     "+ नंबर",
                     modifier = Modifier.shadow(6.dp, RoundedCornerShape(20.dp)),
                     bg = MaterialTheme.colorScheme.primary,
@@ -618,6 +684,62 @@ fun Screen() {
         }
     }
 
+    if (showSms) {
+        val count = if (smsToAll) contacts.size else selected.size
+        AlertDialog(
+            onDismissRequest = { showSms = false },
+            title = { Text("SMS थेट पाठवा") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SmallBtn(
+                            "निवडलेल्यांना (${selected.size})",
+                            bg = if (!smsToAll) Color(0xFF2E7D32) else Color.Transparent,
+                            fg = if (!smsToAll) Color.White else LocalContentColor.current
+                        ) { smsToAll = false }
+                        Spacer(Modifier.width(6.dp))
+                        SmallBtn(
+                            "सर्वांना (${contacts.size})",
+                            bg = if (smsToAll) Color(0xFF2E7D32) else Color.Transparent,
+                            fg = if (smsToAll) Color.White else LocalContentColor.current
+                        ) { smsToAll = true }
+                    }
+                    OutlinedTextField(
+                        value = smsMsg,
+                        onValueChange = { smsMsg = it },
+                        label = { Text("संदेश ({name} = नाव)") },
+                        supportingText = {
+                            val info = if (smsMsg.isEmpty()) "अक्षरे: 0"
+                            else "अक्षरे: ${smsMsg.length} • SMS: ${SmsMessage.calculateLength(smsMsg, false)[0]}"
+                            Text(info, fontSize = 12.sp)
+                        },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                    Text(
+                        "सर्वांना एकच संदेश थेट SMS ने जाईल. मराठी संदेशात एका SMS मध्ये सुमारे 70 अक्षरे बसतात; " +
+                            "जास्त असल्यास एका व्यक्तीला अनेक SMS जातात आणि तुमच्या SIM चे शुल्क लागते.",
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = smsMsg.isNotBlank() && count > 0 && !smsSending,
+                    onClick = {
+                        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.SEND_SMS)
+                            == PackageManager.PERMISSION_GRANTED
+                        ) startSms()
+                        else smsPermLauncher.launch(Manifest.permission.SEND_SMS)
+                    }
+                ) { Text("पाठवा ($count)") }
+            },
+            dismissButton = { TextButton(onClick = { showSms = false }) { Text("रद्द") } }
+        )
+    }
+
     if (showWa) {
         AlertDialog(
             onDismissRequest = { showWa = false },
@@ -629,6 +751,7 @@ fun Screen() {
                         value = waMsg,
                         onValueChange = { waMsg = it },
                         label = { Text("संदेश ({name} = नाव)") },
+                        supportingText = { Text("अक्षरे: ${waMsg.length}", fontSize = 12.sp) },
                         minLines = 3,
                         maxLines = 6,
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
