@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.CallLog
+import android.provider.Settings
 import android.provider.ContactsContract
 import android.content.pm.PackageManager
 import android.os.Build
@@ -115,6 +116,16 @@ fun smsManager(ctx: Context): SmsManager =
     if (Build.VERSION.SDK_INT >= 31) ctx.getSystemService(SmsManager::class.java)
     else SmsManager.getDefault()
 
+// परवानगीशिवाय: Messages अँप संदेशासह उघडतो
+fun openSmsApp(ctx: Context, number: String, msg: String): Boolean = try {
+    val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${number.replace(" ", "")}"))
+    i.putExtra("sms_body", msg)
+    ctx.startActivity(i)
+    true
+} catch (e: Exception) {
+    false
+}
+
 // ---------- WhatsApp helpers ----------
 fun waNumber(raw: String, cc: String): String {
     val d = raw.filter { it.isDigit() }
@@ -211,6 +222,10 @@ fun Screen() {
     var waImageUri by remember { mutableStateOf<Uri?>(null) }
     var queue by remember { mutableStateOf(listOf<Contact>()) }
     var qIndex by remember { mutableStateOf(0) }
+    var queueMode by remember { mutableStateOf("wa") }
+    var query by remember { mutableStateOf("") }
+    var showBye by remember { mutableStateOf(false) }
+    var showSmsDenied by remember { mutableStateOf(false) }
 
     // SMS
     var showSms by remember { mutableStateOf(false) }
@@ -295,10 +310,22 @@ fun Screen() {
         }
     }
 
+    // परवानगी नसल्यास: Messages अँपने एक-एक करून पाठवा
+    fun startSmsViaApp() {
+        val targets = if (smsToAll) contacts.toList() else contacts.filter { it.number in selected }
+        if (targets.isEmpty()) { toast("आधी नंबर निवडा"); return }
+        prefs.edit().putString("sms_msg", smsMsg).apply()
+        showSms = false
+        val ok = openSmsApp(ctx, targets[0].number, smsMsg.replace("{name}", targets[0].name))
+        if (ok) { queueMode = "sms"; queue = targets; qIndex = 1 }
+        else toast("Messages अँप उघडता आला नाही")
+    }
+
     val smsPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) startSms() else toast("SMS परवानगी नाकारली")
+        if (granted) startSms()
+        else { showSms = false; showSmsDenied = true }
     }
 
     // WhatsApp साठी फोटो निवडणे (कॅशमध्ये कॉपी करून FileProvider ने शेअर)
@@ -432,6 +459,13 @@ fun Screen() {
         onDispose { owner.lifecycle.removeObserver(obs) }
     }
 
+    val q = query.trim()
+    val shown = contacts.filter {
+        q.isEmpty() || it.name.contains(q, ignoreCase = true) ||
+            it.number.contains(q, ignoreCase = true) ||
+            it.designation.contains(q, ignoreCase = true)
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -465,14 +499,15 @@ fun Screen() {
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (contacts.isNotEmpty() && selected.size == contacts.size)
-                                            "निवड काढा" else "सर्व निवडा (WhatsApp)"
+                                        if (shown.isNotEmpty() && shown.all { it.number in selected })
+                                            "निवड काढा" else "सर्व निवडा (दिसणारे)"
                                     )
                                 },
                                 onClick = {
                                     menuOpen = false
-                                    if (selected.size == contacts.size) selected.clear()
-                                    else { selected.clear(); selected.addAll(contacts.map { it.number }) }
+                                    if (shown.isNotEmpty() && shown.all { it.number in selected })
+                                        selected.removeAll(shown.map { it.number })
+                                    else shown.forEach { if (it.number !in selected) selected.add(it.number) }
                                 }
                             )
                             DropdownMenuItem(
@@ -499,7 +534,11 @@ fun Screen() {
                     Spacer(Modifier.width(6.dp))
                     SmallBtn("बाहेर", bg = Color(0xFFC62828), fg = Color.White) {
                         saveAll()
-                        (ctx as? Activity)?.finishAffinity()
+                        showBye = true
+                        scope.launch {
+                            delay(1500)
+                            (ctx as? Activity)?.finishAffinity()
+                        }
                     }
                     Spacer(Modifier.width(8.dp))
                 }
@@ -513,19 +552,25 @@ fun Screen() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "WhatsApp: $qIndex/${queue.size}",
+                            "${if (queueMode == "sms") "SMS" else "WhatsApp"}: $qIndex/${queue.size}",
                             fontSize = 13.sp,
                             color = Color(0xFF1B1B1B),
                             modifier = Modifier.weight(1f)
                         )
                         if (qIndex < queue.size) {
                             val nx = queue[qIndex]
-                            SmallBtn("पुढचा: ${nx.name}", bg = Color(0xFF25D366), fg = Color.White) {
-                                val ok = openWhatsApp(
+                            SmallBtn(
+                                "पुढचा: ${nx.name}",
+                                bg = if (queueMode == "sms") Color(0xFFEF6C00) else Color(0xFF25D366),
+                                fg = Color.White
+                            ) {
+                                val ok = if (queueMode == "sms")
+                                    openSmsApp(ctx, nx.number, smsMsg.replace("{name}", nx.name))
+                                else openWhatsApp(
                                     ctx, waNumber(nx.number, cc),
                                     waMsg.replace("{name}", nx.name), waImageUri
                                 )
-                                if (ok) qIndex++ else toast("WhatsApp सापडले नाही")
+                                if (ok) qIndex++ else toast("अँप उघडता आला नाही")
                             }
                             Spacer(Modifier.width(6.dp))
                         }
@@ -574,8 +619,46 @@ fun Screen() {
             }
         }
     ) { pad ->
-        LazyColumn(Modifier.padding(pad).padding(horizontal = 10.dp)) {
-            items(contacts, key = { it.number }) { c ->
+        Column(Modifier.padding(pad).padding(horizontal = 10.dp)) {
+        val fgc = LocalContentColor.current
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp, bottom = 2.dp)
+                .border(1.dp, fgc.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("🔍", fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            BasicTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                textStyle = TextStyle(fontSize = 14.sp, color = fgc),
+                cursorBrush = SolidColor(fgc),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner ->
+                    Box {
+                        if (query.isEmpty()) {
+                            Text(
+                                "शोधा: नाव / नंबर / पदनाम",
+                                fontSize = 14.sp,
+                                color = fgc.copy(alpha = 0.5f)
+                            )
+                        }
+                        inner()
+                    }
+                }
+            )
+            if (query.isNotEmpty()) {
+                Text("${shown.size}/${contacts.size}", fontSize = 11.sp)
+                Spacer(Modifier.width(6.dp))
+                SmallBtn("✕", fontSize = 13) { query = "" }
+            }
+        }
+        LazyColumn(Modifier.weight(1f)) {
+            items(shown, key = { it.number }) { c ->
                 val st = status[c.number] ?: ""
                 val received = st.startsWith("✅")
                 val missed = st.startsWith("❌")
@@ -682,6 +765,56 @@ fun Screen() {
             }
             item { Spacer(Modifier.height(70.dp)) }
         }
+        }
+    }
+
+    if (showSmsDenied) {
+        AlertDialog(
+            onDismissRequest = { showSmsDenied = false },
+            title = { Text("SMS परवानगी नाकारली") },
+            text = {
+                Text(
+                    "थेट SMS पाठवण्यासाठी परवानगी लागते. सेटिंग्जमध्ये जा: App info → ⋮ → " +
+                        "Allow restricted settings, मग Permissions → SMS → Allow. " +
+                        "किंवा परवानगीशिवाय Messages अँपने एक-एक करून पाठवा."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showSmsDenied = false; startSmsViaApp() }) {
+                    Text("Messages अँपने पाठवा")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        showSmsDenied = false
+                        try {
+                            ctx.startActivity(
+                                Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.fromParts("package", ctx.packageName, null)
+                                )
+                            )
+                        } catch (e: Exception) {
+                            toast("सेटिंग्ज उघडता आल्या नाहीत")
+                        }
+                    }) { Text("सेटिंग्ज उघडा") }
+                    TextButton(onClick = { showSmsDenied = false }) { Text("रद्द") }
+                }
+            }
+        )
+    }
+
+    if (showBye) {
+        AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            text = {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text("जय हिंद! 🇮🇳", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
     }
 
     if (showSms) {
@@ -798,7 +931,7 @@ fun Screen() {
                                 ctx, waNumber(c0.number, cc),
                                 waMsg.replace("{name}", c0.name), waImageUri
                             )
-                            if (ok) { queue = list; qIndex = 1 }
+                            if (ok) { queueMode = "wa"; queue = list; qIndex = 1 }
                             else toast("WhatsApp सापडले नाही")
                         }
                     }
