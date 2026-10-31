@@ -2,7 +2,21 @@ package com.example.callnotes
 
 import android.Manifest
 import android.app.Activity
+import android.content.ContentValues
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.pdf.PdfDocument
+import android.os.Environment
+import android.provider.MediaStore
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
+import android.text.TextUtils
+import java.io.ByteArrayOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -108,6 +122,127 @@ fun parseCsv(text: String): List<List<String>> {
     }
     if (sb.isNotEmpty() || row.isNotEmpty()) { row.add(sb.toString()); rows.add(row) }
     return rows
+}
+
+// ---------- PDF रिपोर्ट ----------
+fun buildReportPdf(rows: List<List<String>>, userName: String, userPhone: String): ByteArray {
+    val pageW = 595
+    val pageH = 842
+    val margin = 36
+    val bottomLimit = pageH - 50
+    val pad = 4
+    val colW = intArrayOf(120, 95, 100, 208)
+    val headers = listOf("नाव", "संपर्क नंबर", "पदनाम", "उत्तर / नोंद")
+    val black = android.graphics.Color.BLACK
+
+    val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 10f; color = black
+    }
+    val boldPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 10.5f; color = black; isFakeBoldText = true
+    }
+    val headPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 18f; color = black; isFakeBoldText = true; textAlign = Paint.Align.CENTER
+    }
+    val infoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 11f; color = black }
+    val footPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 9f; color = android.graphics.Color.DKGRAY
+    }
+    val linePaint = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 0.7f; color = black }
+    val fillPaint = Paint().apply {
+        style = Paint.Style.FILL; color = android.graphics.Color.parseColor("#E0E0E0")
+    }
+
+    val doc = PdfDocument()
+    var pageNo = 0
+    var page: PdfDocument.Page? = null
+    var canvas: Canvas? = null
+    var y = 0f
+
+    fun footer() {
+        val c = canvas ?: return
+        c.drawText("@प्रकाश पवार CallList Ver 1.0", margin.toFloat(), (pageH - 24).toFloat(), footPaint)
+        val pn = "पान $pageNo"
+        c.drawText(pn, pageW - margin - footPaint.measureText(pn), (pageH - 24).toFloat(), footPaint)
+    }
+
+    fun startPage() {
+        page?.let { footer(); doc.finishPage(it) }
+        pageNo++
+        val pg = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNo).create())
+        page = pg
+        canvas = pg.canvas
+        y = margin.toFloat()
+    }
+
+    fun layoutOf(text: String, paint: TextPaint, width: Int): StaticLayout =
+        StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setMaxLines(12)
+            .setEllipsize(TextUtils.TruncateAt.END)
+            .build()
+
+    fun drawRow(cells: List<String>, header: Boolean) {
+        val p = if (header) boldPaint else textPaint
+        val layouts = cells.mapIndexed { i, t -> layoutOf(t, p, colW[i] - 2 * pad) }
+        val h = (layouts.maxOf { it.height } + 2 * pad).toFloat()
+        if (y + h > bottomLimit) {
+            startPage()
+            if (!header) drawRow(headers, true)
+        }
+        val c = canvas ?: return
+        var x = margin.toFloat()
+        for (i in cells.indices) {
+            val w = colW[i].toFloat()
+            if (header) c.drawRect(x, y, x + w, y + h, fillPaint)
+            c.drawRect(x, y, x + w, y + h, linePaint)
+            c.save()
+            c.translate(x + pad, y + pad)
+            layouts[i].draw(c)
+            c.restore()
+            x += w
+        }
+        y += h
+    }
+
+    startPage()
+    val c0 = canvas!!
+    c0.drawText("कॉल रिपोर्ट", pageW / 2f, y + 18f, headPaint)
+    y += 36f
+    val date = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())
+    c0.drawText("नाव: $userName", margin.toFloat(), y + 11f, infoPaint)
+    y += 16f
+    c0.drawText("संपर्क: $userPhone", margin.toFloat(), y + 11f, infoPaint)
+    y += 16f
+    c0.drawText("दिनांक: $date", margin.toFloat(), y + 11f, infoPaint)
+    y += 24f
+
+    drawRow(headers, true)
+    rows.forEach { drawRow(it, false) }
+
+    page?.let { footer(); doc.finishPage(it) }
+    val out = ByteArrayOutputStream()
+    doc.writeTo(out)
+    doc.close()
+    return out.toByteArray()
+}
+
+// Android 10+ : थेट Download फोल्डरमध्ये सेव्ह (परवानगी लागत नाही)
+fun savePdfToDownloads(ctx: Context, bytes: ByteArray, fileName: String): Uri? {
+    if (Build.VERSION.SDK_INT < 29) return null
+    return try {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        }
+        val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return null
+        ctx.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+        uri
+    } catch (e: Exception) {
+        null
+    }
 }
 
 // ---------- SMS helper ----------
@@ -225,6 +360,20 @@ fun Screen() {
     var queueMode by remember { mutableStateOf("wa") }
     var query by remember { mutableStateOf("") }
     var showBye by remember { mutableStateOf(false) }
+
+    // वापरकर्त्याची माहिती
+    var userName by remember { mutableStateOf(prefs.getString("user_name", "") ?: "") }
+    var userPhone by remember { mutableStateOf(prefs.getString("user_phone", "") ?: "") }
+    var showProfile by remember { mutableStateOf((prefs.getString("user_name", "") ?: "").isBlank()) }
+    var profName by remember { mutableStateOf(userName) }
+    var profPhone by remember { mutableStateOf(userPhone) }
+
+    // PDF रिपोर्ट
+    var showReport by remember { mutableStateOf(false) }
+    var reportAll by remember { mutableStateOf(false) }
+    var savedPdfUri by remember { mutableStateOf<Uri?>(null) }
+    var savedPdfName by remember { mutableStateOf("") }
+    var pendingPdf by remember { mutableStateOf<ByteArray?>(null) }
     var showSmsDenied by remember { mutableStateOf(false) }
 
     // SMS
@@ -326,6 +475,46 @@ fun Screen() {
     ) { granted ->
         if (granted) startSms()
         else { showSms = false; showSmsDenied = true }
+    }
+
+    // ---------- PDF रिपोर्ट तयार करणे ----------
+    val pdfSaveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri ->
+        val b = pendingPdf
+        if (uri != null && b != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(b) }
+                savedPdfUri = uri
+            } catch (e: Exception) {
+                toast("PDF सेव्ह अयशस्वी")
+            }
+        }
+        pendingPdf = null
+    }
+
+    fun makeReport() {
+        val targets = if (reportAll) contacts.toList() else contacts.filter { it.number in selected }
+        if (targets.isEmpty()) { toast("आधी नंबर निवडा"); return }
+        try {
+            val rows = targets.map {
+                listOf(it.name, it.number, it.designation, notes[it.number] ?: "")
+            }
+            val bytes = buildReportPdf(rows, userName, userPhone)
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val fileName = "CallList_Report_$stamp.pdf"
+            savedPdfName = fileName
+            showReport = false
+            if (Build.VERSION.SDK_INT >= 29) {
+                val uri = savePdfToDownloads(ctx, bytes, fileName)
+                if (uri != null) savedPdfUri = uri else toast("PDF सेव्ह अयशस्वी")
+            } else {
+                pendingPdf = bytes
+                pdfSaveLauncher.launch(fileName)
+            }
+        } catch (e: Exception) {
+            toast("रिपोर्ट तयार करता आला नाही")
+        }
     }
 
     // WhatsApp साठी फोटो निवडणे (कॅशमध्ये कॉपी करून FileProvider ने शेअर)
@@ -469,7 +658,22 @@ fun Screen() {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("कॉल नोट्स", fontSize = 18.sp) },
+                title = {
+                    Column {
+                        Text("कॉल नोट्स", fontSize = 18.sp)
+                        if (userName.isNotBlank()) {
+                            Text(
+                                listOf(userName, userPhone).filter { it.isNotBlank() }.joinToString(" • "),
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.clickable {
+                                    profName = userName; profPhone = userPhone; showProfile = true
+                                }
+                            )
+                        }
+                    }
+                },
                 actions = {
                     SmallBtn(
                         "सेव्ह",
@@ -511,6 +715,13 @@ fun Screen() {
                                 }
                             )
                             DropdownMenuItem(
+                                text = { Text("माझी माहिती बदला") },
+                                onClick = {
+                                    menuOpen = false
+                                    profName = userName; profPhone = userPhone; showProfile = true
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("सर्व नंबर हटवा (क्लीन अँप)", color = Color(0xFFC62828)) },
                                 onClick = {
                                     menuOpen = false
@@ -536,7 +747,7 @@ fun Screen() {
                         saveAll()
                         showBye = true
                         scope.launch {
-                            delay(1500)
+                            delay(2600)
                             (ctx as? Activity)?.finishAffinity()
                         }
                     }
@@ -622,9 +833,12 @@ fun Screen() {
         Column(Modifier.padding(pad).padding(horizontal = 10.dp)) {
         val fgc = LocalContentColor.current
         Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+        Row(
             Modifier
-                .fillMaxWidth()
-                .padding(top = 6.dp, bottom = 2.dp)
+                .weight(1f)
                 .border(1.dp, fgc.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -656,6 +870,12 @@ fun Screen() {
                 Spacer(Modifier.width(6.dp))
                 SmallBtn("✕", fontSize = 13) { query = "" }
             }
+        }
+        Spacer(Modifier.width(6.dp))
+        SmallBtn("📄 रिपोर्ट", bg = Color(0xFF6A1B9A), fg = Color.White) {
+            if (contacts.isEmpty()) toast("यादी रिकामी आहे")
+            else { reportAll = selected.isEmpty(); showReport = true }
+        }
         }
         LazyColumn(Modifier.weight(1f)) {
             items(shown, key = { it.number }) { c ->
@@ -768,6 +988,116 @@ fun Screen() {
         }
     }
 
+    if (showProfile) {
+        AlertDialog(
+            onDismissRequest = { if (userName.isNotBlank()) showProfile = false },
+            title = { Text("तुमची माहिती") },
+            text = {
+                Column {
+                    Text("ही माहिती अँपच्या वरच्या भागात आणि PDF रिपोर्टमध्ये दिसेल.", fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = profName,
+                        onValueChange = { profName = it },
+                        label = { Text("तुमचे नाव") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                    OutlinedTextField(
+                        value = profPhone,
+                        onValueChange = { profPhone = it },
+                        label = { Text("तुमचा संपर्क नंबर") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = profName.isNotBlank() && profPhone.isNotBlank(),
+                    onClick = {
+                        userName = profName.trim()
+                        userPhone = profPhone.trim()
+                        prefs.edit()
+                            .putString("user_name", userName)
+                            .putString("user_phone", userPhone)
+                            .apply()
+                        showProfile = false
+                    }
+                ) { Text("सेव्ह") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    if (userName.isNotBlank()) showProfile = false
+                    else toast("आधी नाव व नंबर भरा")
+                }) { Text("रद्द") }
+            }
+        )
+    }
+
+    if (showReport) {
+        val count = if (reportAll) contacts.size else selected.size
+        AlertDialog(
+            onDismissRequest = { showReport = false },
+            title = { Text("रिपोर्ट (PDF)") },
+            text = {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SmallBtn(
+                            "निवडलेल्यांचा (${selected.size})",
+                            bg = if (!reportAll) Color(0xFF6A1B9A) else Color.Transparent,
+                            fg = if (!reportAll) Color.White else LocalContentColor.current
+                        ) { reportAll = false }
+                        Spacer(Modifier.width(6.dp))
+                        SmallBtn(
+                            "सर्वांचा (${contacts.size})",
+                            bg = if (reportAll) Color(0xFF6A1B9A) else Color.Transparent,
+                            fg = if (reportAll) Color.White else LocalContentColor.current
+                        ) { reportAll = true }
+                    }
+                    Text(
+                        "टेबलमध्ये नाव, संपर्क, पदनाम आणि उत्तर / नोंद असेल. PDF डाउनलोड फोल्डरमध्ये सेव्ह होईल.",
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = count > 0, onClick = { makeReport() }) {
+                    Text("PDF बनवा ($count)")
+                }
+            },
+            dismissButton = { TextButton(onClick = { showReport = false }) { Text("रद्द") } }
+        )
+    }
+
+    if (savedPdfUri != null) {
+        AlertDialog(
+            onDismissRequest = { savedPdfUri = null },
+            title = { Text("रिपोर्ट तयार ✓") },
+            text = { Text("PDF सेव्ह झाला:\n$savedPdfName\n(डाउनलोड फोल्डर)") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val u = savedPdfUri
+                    savedPdfUri = null
+                    if (u != null) {
+                        try {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(u, "application/pdf")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                            )
+                        } catch (e: Exception) {
+                            toast("PDF उघडण्यासाठी व्ह्यूअर अँप नाही")
+                        }
+                    }
+                }) { Text("उघडा") }
+            },
+            dismissButton = { TextButton(onClick = { savedPdfUri = null }) { Text("ठीक") } }
+        )
+    }
+
     if (showSmsDenied) {
         AlertDialog(
             onDismissRequest = { showSmsDenied = false },
@@ -810,8 +1140,15 @@ fun Screen() {
             onDismissRequest = {},
             confirmButton = {},
             text = {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text("जय हिंद! 🇮🇳", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                Column(
+                    Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("जय हिंद 🇮🇳", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    Text("धन्यवाद!....", fontSize = 22.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(10.dp))
+                    Text("@ प्रकाश पवार CallList", fontSize = 16.sp)
                 }
             }
         )
@@ -958,7 +1295,10 @@ fun Screen() {
                     status.clear()
                     notes.clear()
                     pending = null
-                    prefs.edit().clear().apply()
+                    prefs.edit().clear()
+                        .putString("user_name", userName)
+                        .putString("user_phone", userPhone)
+                        .apply()
                     showClearAll = false
                     toast("अँप क्लीन झाले")
                 }) { Text("हो, हटवा", color = Color(0xFFC62828)) }
